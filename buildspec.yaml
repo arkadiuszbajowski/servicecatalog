@@ -1,0 +1,42 @@
+version: 0.2
+
+env:
+  variables:
+    TF_VAR_vpc_name: ""
+    TF_VAR_vpc_cidr: ""
+    TF_ACTION: ""
+  
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - echo Installing Terraform...
+      - curl https://releases.hashicorp.com/terraform/1.0.2/terraform_1.0.2_linux_amd64.zip -o terraform.zip
+      - unzip terraform.zip
+      - mv terraform /usr/local/bin/
+      - terraform --version
+
+  pre_build:
+    commands:
+      - echo Preparing...
+      - terraform init
+
+  build:
+    commands:
+      - echo Running Terraform plan...
+      - terraform plan -out=tfplan
+
+  post_build:
+    commands:
+      - |
+        if [ "$TF_ACTION" = "plan" ]; then
+          echo "Terraform $TF_ACTION completed..."
+        elif [ "$TF_ACTION" = "apply" ]; then
+          echo "Terraform $TF_ACTION approved..."
+          terraform apply tfplan
+        elif [ "$TF_ACTION" = "destroy" ]; then
+          echo "Terraform $TF_ACTION approved..."
+          terraform destroy -auto-approve
+        fi
+      - echo Terraform $TF_ACTION completed
