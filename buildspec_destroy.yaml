@@ -1,0 +1,14 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "Downloading Terraform..."
+      - curl -LO https://releases.hashicorp.com/terraform/1.0.0/terraform_1.0.0_linux_amd64.zip
+      - unzip terraform_1.0.0_linux_amd64.zip
+      - sudo mv terraform /usr/local/bin/
+      - terraform --version  # This will print the terraform version to the console
+  build:
+    commands:
+      - echo "Executing Terraform destroy"
+      - terraform init
+      - terraform destroy -auto-approve -var="vpc_name=$VPC_NAME" -var="vpc_cidr=$VPC_CIDR"

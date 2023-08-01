@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template for a Step Function to deploy and destroy Terraform using CodeBuild
+
+Parameters:
+  TerraformBucketName:
+    Type: String
+    Description: Name of the S3 bucket to store Terraform state and files
+
+  VPCName:
+    Type: String
+    Description: Name of the VPC
+
+  VPCCidr:
+    Type: String
+    Description: CIDR block for the VPC
+
+  CodeBuildPlanProjectName:
+    Type: String
+    Description: Name of the CodeBuild Project that plans the infrastructure
+
+  CodeBuildApplyProjectName:
+    Type: String
+    Description: Name of the CodeBuild Project that applies the infrastructure
+
+  CodeBuildDestroyProjectName:
+    Type: String
+    Description: Name of the CodeBuild Project that destroys the infrastructure
+
+Resources:
+  CodeBuildBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: CodeBuildBasePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${TerraformBucketName}/*"
+
+  CodeBuildPlanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildPlanProjectName
+      Description: CodeBuild project for Terraform plan
+      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Source:
+        Type: GITHUB
+        Location: "https://github.com/<your-username>/<your-repo>.git"
+        BuildSpec: "buildspec_plan.yml"
+      SourceVersion: "refs/heads/main"
+      TimeoutInMinutes: 10
+
+  CodeBuildApplyProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildApplyProjectName
+      Description: CodeBuild project for Terraform apply
+      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Source:
+        Type: GITHUB
+        Location: "https://github.com/<your-username>/<your-repo>.git"
+        BuildSpec: "buildspec_apply.yml"
+      SourceVersion: "refs/heads/main"
+      TimeoutInMinutes: 10
+
+  CodeBuildDestroyProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildDestroyProjectName
+      Description: CodeBuild project for Terraform destroy
+      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Source:
+        Type: GITHUB
+        Location: "https://github.com/<your-username>/<your-repo>.git"
+        BuildSpec: "buildspec_destroy.yml"
+      SourceVersion: "refs/heads/main"
+      TimeoutInMinutes: 10
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StateMachinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: "*"
+
+  TerraformDeploymentStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: 
+        !Sub |
+          {
+            "Comment": "A State Machine to manage Terraform deployments",
+            "StartAt": "ChoiceState",
+            "States": {
+              "ChoiceState": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.action",
+                    "StringEquals": "plan",
+                    "Next": "CodeBuildPlanState"
+                  },
+                  {
+                    "Variable": "$.action",
+                    "StringEquals": "apply",
+                    "Next": "CodeBuildApplyState"
+                  },
+                  {
+                    "Variable": "$.action",
+                    "StringEquals": "destroy",
+                    "Next": "CodeBuildDestroyState"
+                  }
+                ],
+                "Default": "CodeBuildPlanState"
+              },
+              "CodeBuildPlanState": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+                "Parameters": {
+                  "ProjectName": "${CodeBuildPlanProjectName}",
+                  "EnvironmentVariablesOverride": [
+                    {
+                      "Name": "VPC_NAME",
+                      "Value.$": "$.vpc_name"
+                    },
+                    {
+                      "Name": "VPC_CIDR",
+                      "Value.$": "$.vpc_cidr"
+                    }
+                  ]
+                },
+                "End": true
+              },
+              "CodeBuildApplyState": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+                "Parameters": {
+                  "ProjectName": "${CodeBuildApplyProjectName}",
+                  "EnvironmentVariablesOverride": [
+                    {
+                      "Name": "VPC_NAME",
+                      "Value.$": "$.vpc_name"
+                    },
+                    {
+                      "Name": "VPC_CIDR",
+                      "Value.$": "$.vpc_cidr"
+                    }
+                  ]
+                },
+                "End": true
+              },
+              "CodeBuildDestroyState": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+                "Parameters": {
+                  "ProjectName": "${CodeBuildDestroyProjectName}",
+                  "EnvironmentVariablesOverride": [
+                    {
+                      "Name": "VPC_NAME",
+                      "Value.$": "$.vpc_name"
+                    },
+                    {
+                      "Name": "VPC_CIDR",
+                      "Value.$": "$.vpc_cidr"
+                    }
+                  ]
+                },
+                "End": true
+              }
+            }
+          }
+      RoleArn: !GetAtt StateMachineRole.Arn
+      StateMachineName: TerraformDeploymentStateMachine
+      StateMachineType: STANDARD
