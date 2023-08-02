@@ -98,7 +98,6 @@ Resources:
   SignalingLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: SignalingLambdaFunction
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.8
