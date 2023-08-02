@@ -22,7 +22,7 @@ phases:
       - echo Preparing...
       - |
         echo Creating tfvars.json from environment variables...
-        echo -e "{\n\t\"vpc_name\": \"$TF_VAR_vpc_name\",\n\t\"vpc_cidr\": \"$TF_VAR_vpc_cidr\"\n}" > tfvars.json
+        python -c "import json; print(json.dumps({'vpc_name': '${TF_VAR_vpc_name}', 'vpc_cidr': '${TF_VAR_vpc_cidr}'}))" > tfvars.json
       - terraform init
 
   build:
@@ -43,3 +43,4 @@ phases:
           terraform destroy -var-file=tfvars.json -auto-approve
         fi
       - echo Terraform $TF_ACTION completed
+    
