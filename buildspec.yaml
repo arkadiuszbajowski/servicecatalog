@@ -2,8 +2,8 @@ version: 0.2
 
 env:
   variables:
-    TF_VAR_vpc_name: ""
-    TF_VAR_vpc_cidr: ""
+    VPC_NAME: ""
+    VPC_CIDR: ""
     TF_ACTION: ""
 
 phases:
@@ -22,7 +22,7 @@ phases:
       - echo Preparing...
       - |
         echo Creating tfvars.json from environment variables...
-        python -c "import json; print(json.dumps({'vpc_name': '${TF_VAR_vpc_name}', 'vpc_cidr': '${TF_VAR_vpc_cidr}'}))" > tfvars.json
+        python -c "import json; print(json.dumps({'vpc_name': '${VPC_NAME}', 'vpc_cidr': '${VPC_CIDR}'}))" > tfvars.json
       - terraform init
 
   build:
