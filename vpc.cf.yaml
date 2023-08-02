@@ -107,19 +107,25 @@ Resources:
           import os
           import json
           import boto3
-          import requests
+          import urllib.request
 
           def handler(event, context):
-              response_url = os.environ['ResponseURL']
-              headers = {'Content-Type':''}
+              # Accessing response_url from event
+              response_url = event['WaitConditionHandleUrl']
+              headers = {'Content-Type': 'application/json'}
               body = json.dumps({
                   "Status" : "SUCCESS",
                   "Reason" : "Configuration Complete",
                   "UniqueId" : "LambdaSignal",
                   "Data" : "Workflow completed."
               })
-              response = requests.put(response_url, headers=headers, data=body)
-              return response.text
+
+              # Convert body to bytes, as the urlopen method expects bytes-like object for the data parameter
+              body = body.encode('utf-8')
+
+              req = urllib.request.Request(response_url, data=body, headers=headers, method='PUT')
+              with urllib.request.urlopen(req) as response:
+                  return response.read().decode('utf-8')
 
       Environment:
         Variables:
@@ -159,6 +165,10 @@ Resources:
           {
             "Comment": "A Step Function to execute Terraform CodeBuild Projects",
             "StartAt": "ActionChoice",
+            "Input": {
+                "WaitConditionHandleUrl": "the pre-signed URL from CloudFormation",
+                
+            },
             "States": {
               "ActionChoice": {
                 "Type": "Choice",
@@ -292,6 +302,7 @@ Resources:
                           "action": action,
                           "vpcName": event['ResourceProperties']['VPCName'],
                           "vpcCidr": event['ResourceProperties']['VPCCidr'],
+                          "signalUrl": os.environ['SIGNAL_URL'],
                       })
                   )
                   return {
@@ -315,6 +326,7 @@ Resources:
       Environment:
         Variables:
           STATE_MACHINE_ARN: !Ref TerraformDeploymentStateMachine
+          SIGNAL_URL: !Ref WaitHandle
       Runtime: "python3.8"
       Timeout: "60"
 
