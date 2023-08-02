@@ -5,7 +5,7 @@ env:
     TF_VAR_vpc_name: ""
     TF_VAR_vpc_cidr: ""
     TF_ACTION: ""
-  
+
 phases:
   install:
     runtime-versions:
@@ -20,12 +20,15 @@ phases:
   pre_build:
     commands:
       - echo Preparing...
+      - |
+        echo Creating tfvars.json from environment variables...
+        echo -e "{\n\t\"vpc_name\": \"$TF_VAR_vpc_name\",\n\t\"vpc_cidr\": \"$TF_VAR_vpc_cidr\"\n}" > tfvars.json
       - terraform init
 
   build:
     commands:
       - echo Running Terraform plan...
-      - terraform plan -out=tfplan
+      - terraform plan -var-file=tfvars.json -out=tfplan
 
   post_build:
     commands:
@@ -34,9 +37,9 @@ phases:
           echo "Terraform $TF_ACTION completed..."
         elif [ "$TF_ACTION" = "apply" ]; then
           echo "Terraform $TF_ACTION approved..."
-          terraform apply tfplan
+          terraform apply -var-file=tfvars.json tfplan
         elif [ "$TF_ACTION" = "destroy" ]; then
           echo "Terraform $TF_ACTION approved..."
-          terraform destroy -auto-approve
+          terraform destroy -var-file=tfvars.json -auto-approve
         fi
       - echo Terraform $TF_ACTION completed

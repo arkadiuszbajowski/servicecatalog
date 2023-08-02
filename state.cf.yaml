@@ -2,10 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: CloudFormation Template for a Step Function to deploy and destroy Terraform using CodeBuild
 
 Parameters:
-  TerraformBucketName:
-    Type: String
-    Description: Name of the S3 bucket to store Terraform state and files
-
   VPCName:
     Type: String
     Description: Name of the VPC
@@ -14,17 +10,10 @@ Parameters:
     Type: String
     Description: CIDR block for the VPC
 
-  CodeBuildPlanProjectName:
+  CodeBuildProjectName:
     Type: String
-    Description: Name of the CodeBuild Project that plans the infrastructure
-
-  CodeBuildApplyProjectName:
-    Type: String
-    Description: Name of the CodeBuild Project that applies the infrastructure
-
-  CodeBuildDestroyProjectName:
-    Type: String
-    Description: Name of the CodeBuild Project that destroys the infrastructure
+    Description: Name of the CodeBuild Project
+    Default: ServiceCatalog
 
 Resources:
   CodeBuildBaseRole:
@@ -49,71 +38,92 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: arn:aws:logs:*:*:*
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildProjectName
+      Description: CodeBuild project for Terraform operations
+      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: VPC_NAME
+            Value: !Ref VPCName
+          - Name: VPC_CIDR
+            Value: !Ref VPCCidr
+      Source:
+        Type: GITHUB
+        Location: "https://github.com/arkadiuszbajowski/servicecatalog.git"
+        BuildSpec: "buildspec.yaml"
+      SourceVersion: "refs/heads/main"
+      TimeoutInMinutes: 10
+
+  WaitHandle:
+    Type: "AWS::CloudFormation::WaitConditionHandle"
+
+  WaitCondition:
+    Type: "AWS::CloudFormation::WaitCondition"
+    DependsOn: TerraformDeploymentStateMachine
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: "120"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
               - Effect: Allow
                 Action:
-                  - s3:GetObject
-                  - s3:GetObjectVersion
-                  - s3:GetBucketVersioning
-                  - s3:PutObject
-                Resource:
-                  - !Sub "arn:aws:s3:::${TerraformBucketName}/*"
-
-  CodeBuildPlanProject:
-    Type: AWS::CodeBuild::Project
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              
+  SignalingLambdaFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      Name: !Ref CodeBuildPlanProjectName
-      Description: CodeBuild project for Terraform plan
-      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-      Environment:
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:5.0
-        Type: LINUX_CONTAINER
-      Source:
-        Type: GITHUB
-        Location: "https://github.com/<your-username>/<your-repo>.git"
-        BuildSpec: "buildspec_plan.yml"
-      SourceVersion: "refs/heads/main"
-      TimeoutInMinutes: 10
+      FunctionName: SignalingLambdaFunction
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+          import requests
 
-  CodeBuildApplyProject:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: !Ref CodeBuildApplyProjectName
-      Description: CodeBuild project for Terraform apply
-      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-      Environment:
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:5.0
-        Type: LINUX_CONTAINER
-      Source:
-        Type: GITHUB
-        Location: "https://github.com/<your-username>/<your-repo>.git"
-        BuildSpec: "buildspec_apply.yml"
-      SourceVersion: "refs/heads/main"
-      TimeoutInMinutes: 10
+          def handler(event, context):
+              response_url = os.environ['ResponseURL']
+              headers = {'Content-Type':''}
+              body = json.dumps({
+                  "Status" : "SUCCESS",
+                  "Reason" : "Configuration Complete",
+                  "UniqueId" : "LambdaSignal",
+                  "Data" : "Workflow completed."
+              })
+              response = requests.put(response_url, headers=headers, data=body)
+              return response.text
 
-  CodeBuildDestroyProject:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: !Ref CodeBuildDestroyProjectName
-      Description: CodeBuild project for Terraform destroy
-      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
       Environment:
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:5.0
-        Type: LINUX_CONTAINER
-      Source:
-        Type: GITHUB
-        Location: "https://github.com/<your-username>/<your-repo>.git"
-        BuildSpec: "buildspec_destroy.yml"
-      SourceVersion: "refs/heads/main"
-      TimeoutInMinutes: 10
+        Variables:
+          ResponseURL: !Ref WaitHandle
 
   StateMachineRole:
     Type: AWS::IAM::Role
@@ -134,6 +144,11 @@ Resources:
                 Action:
                   - codebuild:StartBuild
                   - codebuild:BatchGetBuilds
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:DescribeRule
+                  - lambda:InvokeFunction
+                  - codebuild:*
                 Resource: "*"
 
   TerraformDeploymentStateMachine:
@@ -142,82 +157,111 @@ Resources:
       DefinitionString: 
         !Sub |
           {
-            "Comment": "A State Machine to manage Terraform deployments",
-            "StartAt": "ChoiceState",
+            "Comment": "A Step Function to execute Terraform CodeBuild Projects",
+            "StartAt": "ActionChoice",
             "States": {
-              "ChoiceState": {
+              "ActionChoice": {
                 "Type": "Choice",
                 "Choices": [
                   {
                     "Variable": "$.action",
                     "StringEquals": "plan",
-                    "Next": "CodeBuildPlanState"
+                    "Next": "TerraformPlan"
                   },
                   {
                     "Variable": "$.action",
                     "StringEquals": "apply",
-                    "Next": "CodeBuildApplyState"
+                    "Next": "TerraformPlanAndApply"
                   },
                   {
                     "Variable": "$.action",
                     "StringEquals": "destroy",
-                    "Next": "CodeBuildDestroyState"
+                    "Next": "TerraformPlanAndDestroy"
                   }
                 ],
-                "Default": "CodeBuildPlanState"
+                "Default": "TerraformPlan"
               },
-              "CodeBuildPlanState": {
+              "TerraformPlan": {
                 "Type": "Task",
                 "Resource": "arn:aws:states:::codebuild:startBuild.sync",
                 "Parameters": {
-                  "ProjectName": "${CodeBuildPlanProjectName}",
+                  "ProjectName": "${CodeBuildProjectName}",
                   "EnvironmentVariablesOverride": [
                     {
-                      "Name": "VPC_NAME",
-                      "Value.$": "$.vpc_name"
-                    },
-                    {
-                      "Name": "VPC_CIDR",
-                      "Value.$": "$.vpc_cidr"
+                      "Name": "COMMAND",
+                      "Value": "plan"
                     }
                   ]
                 },
-                "End": true
+                "Next": "SignalWaitCondition"
               },
-              "CodeBuildApplyState": {
+              "TerraformPlanAndApply": {
                 "Type": "Task",
                 "Resource": "arn:aws:states:::codebuild:startBuild.sync",
                 "Parameters": {
-                  "ProjectName": "${CodeBuildApplyProjectName}",
+                  "ProjectName": "${CodeBuildProjectName}",
                   "EnvironmentVariablesOverride": [
                     {
-                      "Name": "VPC_NAME",
-                      "Value.$": "$.vpc_name"
-                    },
-                    {
-                      "Name": "VPC_CIDR",
-                      "Value.$": "$.vpc_cidr"
+                      "Name": "COMMAND",
+                      "Value": "plan"
                     }
                   ]
                 },
-                "End": true
+                "Next": "WaitForApplyApproval"
               },
-              "CodeBuildDestroyState": {
+              "WaitForApplyApproval": {
+                "Type": "Pass",
+                "Next": "TerraformApply"
+              },
+              "TerraformApply": {
                 "Type": "Task",
                 "Resource": "arn:aws:states:::codebuild:startBuild.sync",
                 "Parameters": {
-                  "ProjectName": "${CodeBuildDestroyProjectName}",
+                  "ProjectName": "${CodeBuildProjectName}",
                   "EnvironmentVariablesOverride": [
                     {
-                      "Name": "VPC_NAME",
-                      "Value.$": "$.vpc_name"
-                    },
-                    {
-                      "Name": "VPC_CIDR",
-                      "Value.$": "$.vpc_cidr"
+                      "Name": "COMMAND",
+                      "Value": "apply"
                     }
                   ]
                 },
+                "Next": "SignalWaitCondition"
+              },
+              "TerraformPlanAndDestroy": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+                "Parameters": {
+                  "ProjectName": "${CodeBuildProjectName}",
+                  "EnvironmentVariablesOverride": [
+                    {
+                      "Name": "COMMAND",
+                      "Value": "plan"
+                    }
+                  ]
+                },
+                "Next": "WaitForDestroyApproval"
+              },
+              "WaitForDestroyApproval": {
+                "Type": "Pass",
+                "Next": "TerraformDestroy"
+              },
+              "TerraformDestroy": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
+                "Parameters": {
+                  "ProjectName": "${CodeBuildProjectName}",
+                  "EnvironmentVariablesOverride": [
+                    {
+                      "Name": "COMMAND",
+                      "Value": "destroy"
+                    }
+                  ]
+                },
+                "Next": "SignalWaitCondition"
+              },
+              "SignalWaitCondition": {
+                "Type": "Task",
+                "Resource": "${SignalingLambdaFunction.Arn}",
                 "End": true
               }
             }
@@ -225,3 +269,85 @@ Resources:
       RoleArn: !GetAtt StateMachineRole.Arn
       StateMachineName: TerraformDeploymentStateMachine
       StateMachineType: STANDARD
+
+  StateMachineExecutorLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role: !GetAtt StateMachineExecutorRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+
+          client = boto3.client('stepfunctions')
+
+          def handler(event, context):
+              try:
+                  action = 'apply' if event['RequestType'] == 'Create' else 'destroy'
+                  response = client.start_execution(
+                      stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                      input=json.dumps({
+                          "action": action,
+                          "vpcName": event['ResourceProperties']['VPCName'],
+                          "vpcCidr": event['ResourceProperties']['VPCCidr'],
+                      })
+                  )
+                  return {
+                      'PhysicalResourceId': response['executionArn'],
+                      'Data': {
+                          'ExecutionArn': response['executionArn']
+                      }
+                  }
+              except Exception as e:
+                  # In case of any errors, catch the exception and return a 'FAILED' status to CloudFormation
+                  error_message = str(e)
+                  print(f"Error: {error_message}")
+                  response_data = {
+                      'Error': error_message
+                  }
+                  return {
+                      'Status': 'FAILED',
+                      'Reason': error_message,
+                      'Data': response_data
+                  }
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref TerraformDeploymentStateMachine
+      Runtime: "python3.8"
+      Timeout: "60"
+
+  StepFunctionTrigger:
+    Type: "Custom::StateMachineTrigger"
+    Properties:
+      ServiceToken: !GetAtt StateMachineExecutorLambda.Arn
+      VPCName: !Ref VPCName
+      VPCCidr: !Ref VPCCidr
+
+  StateMachineExecutorRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "StateMachineExecutorPolicy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: "Allow"
+                Action:
+                  - "states:StartExecution"
+                Resource: !Ref TerraformDeploymentStateMachine

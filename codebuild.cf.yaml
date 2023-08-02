@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template for a Step Function to deploy and destroy Terraform using CodeBuild
+
+Parameters:
+  VPCName:
+    Type: String
+    Description: Name of the VPC
+
+  VPCCidr:
+    Type: String
+    Description: CIDR block for the VPC
+
+  CodeBuildProjectName:
+    Type: String
+    Description: Name of the CodeBuild Project
+    Default: ServiceCatalog
+
+Resources:
+  CodeBuildBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: CodeBuildBasePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildProjectName
+      Description: CodeBuild project for Terraform operations
+      ServiceRole: !GetAtt CodeBuildBaseRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: VPC_NAME
+            Value: !Ref VPCName
+          - Name: VPC_CIDR
+            Value: !Ref VPCCidr
+      Source:
+        Type: GITHUB
+        Location: "https://github.com/arkadiuszbajowski/servicecatalog.git"
+        BuildSpec: "buildspec.yaml"
+      SourceVersion: "refs/heads/main"
+      TimeoutInMinutes: 10
