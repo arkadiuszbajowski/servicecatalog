@@ -165,10 +165,6 @@ Resources:
           {
             "Comment": "A Step Function to execute Terraform CodeBuild Projects",
             "StartAt": "ActionChoice",
-            "Input": {
-                "WaitConditionHandleUrl": "the pre-signed URL from CloudFormation",
-                
-            },
             "States": {
               "ActionChoice": {
                 "Type": "Choice",
