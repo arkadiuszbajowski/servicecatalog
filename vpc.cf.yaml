@@ -36,8 +36,15 @@ Resources:
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
-                  - logs:PutLogEvents
+                  - logs:PutLogEvents      
                 Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - ec2:*
+                  - iam:*
+                  - sts:*
+                Resource: "*"
 
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
@@ -71,7 +78,7 @@ Resources:
     DependsOn: TerraformDeploymentStateMachine
     Properties:
       Handle: !Ref WaitHandle
-      Timeout: "120"
+      Timeout: "180"
 
   LambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -94,8 +101,57 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: '*'
-              
-  SignalingLambdaFunction:
+  ErrorSignalingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Environment:
+        Variables:
+          ResponseURL: !Ref WaitHandle
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import urllib.request
+
+          def handler(event, context):
+              # Accessing response_url from event
+              response_url = os.environ['ResponseURL']
+
+              body = json.dumps({
+                  "Status": "FAILURE",
+                  "Reason": "Configuration Complete",
+                  "UniqueId": "LambdaSignal",
+                  "Data": "Workflow completed."
+              })
+
+              # Convert body to bytes, as the urlopen method expects bytes-like object for the data parameter
+              body_bytes = body.encode('utf-8')
+
+              headers = {
+                  'Content-Type': ''   # Set an empty Content-Type similar to "Content-Type:" in your curl command
+              }
+
+              print(response_url)
+              req = urllib.request.Request(response_url, data=body_bytes, headers=headers, method='PUT')
+
+              # By default, urllib uses a timeout of 60 seconds. We'll set it to 10 seconds to match your curl command's --connect-timeout
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as response:
+                      response_text = response.read().decode('utf-8')
+
+                  # Print the response to CloudWatch logs
+                  print(f"Response from CloudFormation: {response_text}")
+
+                  # Return the response
+                  return response_text
+
+              except urllib.error.URLError as e:
+                  print(f"Error occurred while sending the request: {e}")
+                  return f"Error: {e}"              
+  SuccessSignalingLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       Handler: index.handler
@@ -105,26 +161,45 @@ Resources:
         ZipFile: |
           import os
           import json
-          import boto3
           import urllib.request
 
           def handler(event, context):
               # Accessing response_url from event
-              response_url = event['WaitConditionHandleUrl']
-              headers = {'Content-Type': 'application/json'}
+              response_url = os.environ['ResponseURL']
+
               body = json.dumps({
-                  "Status" : "SUCCESS",
-                  "Reason" : "Configuration Complete",
-                  "UniqueId" : "LambdaSignal",
-                  "Data" : "Workflow completed."
+                  "Status": "SUCCESS",
+                  "Reason": "Configuration Complete",
+                  "UniqueId": "LambdaSignal",
+                  "Data": "Workflow completed."
               })
 
               # Convert body to bytes, as the urlopen method expects bytes-like object for the data parameter
-              body = body.encode('utf-8')
+              body_bytes = body.encode('utf-8')
 
-              req = urllib.request.Request(response_url, data=body, headers=headers, method='PUT')
-              with urllib.request.urlopen(req) as response:
-                  return response.read().decode('utf-8')
+              headers = {
+                  'Content-Type': ''   # Set an empty Content-Type similar to "Content-Type:" in your curl command
+              }
+
+              print(response_url)
+              req = urllib.request.Request(response_url, data=body_bytes, headers=headers, method='PUT')
+
+              # By default, urllib uses a timeout of 60 seconds. We'll set it to 10 seconds to match your curl command's --connect-timeout
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as response:
+                      response_text = response.read().decode('utf-8')
+
+                  # Print the response to CloudWatch logs
+                  print(f"Response from CloudFormation: {response_text}")
+
+                  # Return the response
+                  return response_text
+
+              except urllib.error.URLError as e:
+                  print(f"Error occurred while sending the request: {e}")
+                  return f"Error: {e}"    
+
+              
 
       Environment:
         Variables:
@@ -154,10 +229,12 @@ Resources:
                   - events:DescribeRule
                   - lambda:InvokeFunction
                   - codebuild:*
+                  
                 Resource: "*"
 
   TerraformDeploymentStateMachine:
     Type: AWS::StepFunctions::StateMachine
+    
     Properties:
       DefinitionString: 
         !Sub |
@@ -193,11 +270,17 @@ Resources:
                   "ProjectName": "${CodeBuildProjectName}",
                   "EnvironmentVariablesOverride": [
                     {
-                      "Name": "COMMAND",
+                      "Name": "TF_ACTION",
                       "Value": "plan"
                     }
                   ]
                 },
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "LambdaErrorSignal"
+                  }
+                ],
                 "Next": "SignalWaitCondition"
               },
               "TerraformPlanAndApply": {
@@ -207,29 +290,17 @@ Resources:
                   "ProjectName": "${CodeBuildProjectName}",
                   "EnvironmentVariablesOverride": [
                     {
-                      "Name": "COMMAND",
-                      "Value": "plan"
-                    }
-                  ]
-                },
-                "Next": "WaitForApplyApproval"
-              },
-              "WaitForApplyApproval": {
-                "Type": "Pass",
-                "Next": "TerraformApply"
-              },
-              "TerraformApply": {
-                "Type": "Task",
-                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
-                "Parameters": {
-                  "ProjectName": "${CodeBuildProjectName}",
-                  "EnvironmentVariablesOverride": [
-                    {
-                      "Name": "COMMAND",
+                      "Name": "TF_ACTION",
                       "Value": "apply"
                     }
                   ]
                 },
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "LambdaErrorSignal"
+                  }
+                ],
                 "Next": "SignalWaitCondition"
               },
               "TerraformPlanAndDestroy": {
@@ -239,40 +310,32 @@ Resources:
                   "ProjectName": "${CodeBuildProjectName}",
                   "EnvironmentVariablesOverride": [
                     {
-                      "Name": "COMMAND",
-                      "Value": "plan"
-                    }
-                  ]
-                },
-                "Next": "WaitForDestroyApproval"
-              },
-              "WaitForDestroyApproval": {
-                "Type": "Pass",
-                "Next": "TerraformDestroy"
-              },
-              "TerraformDestroy": {
-                "Type": "Task",
-                "Resource": "arn:aws:states:::codebuild:startBuild.sync",
-                "Parameters": {
-                  "ProjectName": "${CodeBuildProjectName}",
-                  "EnvironmentVariablesOverride": [
-                    {
-                      "Name": "COMMAND",
+                      "Name": "TF_ACTION",
                       "Value": "destroy"
                     }
                   ]
                 },
+                "Catch": [
+                  {
+                    "ErrorEquals": ["States.ALL"],
+                    "Next": "LambdaErrorSignal"
+                  }
+                ],
                 "Next": "SignalWaitCondition"
               },
               "SignalWaitCondition": {
                 "Type": "Task",
-                "Resource": "${SignalingLambdaFunction.Arn}",
+                "Resource": "${SuccessSignalingLambdaFunction.Arn}",
+                "End": true
+              },
+              "LambdaErrorSignal": {
+                "Type": "Task",
+                "Resource": "${ErrorSignalingLambdaFunction.Arn}",
                 "End": true
               }
             }
           }
       RoleArn: !GetAtt StateMachineRole.Arn
-      StateMachineName: TerraformDeploymentStateMachine
       StateMachineType: STANDARD
 
   StateMachineExecutorLambda:
@@ -282,42 +345,97 @@ Resources:
       Role: !GetAtt StateMachineExecutorRole.Arn
       Code:
         ZipFile: |
-          import boto3
           import json
+          import logging
           import os
+          import boto3
+          from urllib.request import Request, build_opener, HTTPHandler
 
+          LOGGER = logging.getLogger()
+          LOGGER.setLevel(logging.INFO)
           client = boto3.client('stepfunctions')
 
           def handler(event, context):
+              '''Handle Lambda event from AWS'''
               try:
-                  action = 'apply' if event['RequestType'] == 'Create' else 'destroy'
-                  response = client.start_execution(
-                      stateMachineArn=os.environ['STATE_MACHINE_ARN'],
-                      input=json.dumps({
-                          "action": action,
-                          "vpcName": event['ResourceProperties']['VPCName'],
-                          "vpcCidr": event['ResourceProperties']['VPCCidr'],
-                          "signalUrl": os.environ['SIGNAL_URL'],
-                      })
-                  )
-                  return {
-                      'PhysicalResourceId': response['executionArn'],
-                      'Data': {
-                          'ExecutionArn': response['executionArn']
-                      }
-                  }
+                  LOGGER.info('REQUEST RECEIVED:\n %s', event)
+                  LOGGER.info('REQUEST RECEIVED:\n %s', context)
+                  
+                  if event['RequestType'] == 'Create':
+                      LOGGER.info('CREATE!')
+                      response = client.start_execution(
+                          stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                          input=json.dumps({
+                              "action": "apply",
+                              "vpcName": event['ResourceProperties']['VPCName'],
+                              "vpcCidr": event['ResourceProperties']['VPCCidr'],
+                              "signalUrl": os.environ['SIGNAL_URL'],
+                          })
+                      )
+                      send_response(event, context, "SUCCESS",
+                                    {"Message": "Resource creation successful!", "ExecutionArn": response['executionArn']})
+                                    
+                  elif event['RequestType'] == 'Update':
+                      LOGGER.info('UPDATE!')
+                      response = client.start_execution(
+                          stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                          input=json.dumps({
+                              "action": "update",
+                              "vpcName": event['ResourceProperties']['VPCName'],
+                              "vpcCidr": event['ResourceProperties']['VPCCidr'],
+                              "signalUrl": os.environ['SIGNAL_URL'],
+                          })
+                      )
+                      send_response(event, context, "SUCCESS",
+                                    {"Message": "Resource update successful!", "ExecutionArn": response['executionArn']})
+                                    
+                  elif event['RequestType'] == 'Delete':
+                      LOGGER.info('DELETE!')
+                      response = client.start_execution(
+                          stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                          input=json.dumps({
+                              "action": "destroy",
+                              "vpcName": event['ResourceProperties']['VPCName'],
+                              "vpcCidr": event['ResourceProperties']['VPCCidr'],
+                              "signalUrl": os.environ['SIGNAL_URL'],
+                          })
+                      )
+                      send_response(event, context, "SUCCESS",
+                                    {"Message": "Resource deletion successful!"})
+
+                  else:
+                      LOGGER.info('FAILED!')
+                      send_response(event, context, "FAILED",
+                                    {"Message": "Unexpected event received from CloudFormation"})
+                                    
               except Exception as e:
-                  # In case of any errors, catch the exception and return a 'FAILED' status to CloudFormation
-                  error_message = str(e)
-                  print(f"Error: {error_message}")
-                  response_data = {
-                      'Error': error_message
-                  }
-                  return {
-                      'Status': 'FAILED',
-                      'Reason': error_message,
-                      'Data': response_data
-                  }
+                  LOGGER.info('FAILED due to error: %s', e)
+                  send_response(event, context, "FAILED", {
+                      "Message": "Exception during processing: " + str(e)})
+
+          def send_response(event, context, response_status, response_data):
+              '''Send a resource manipulation status response to CloudFormation'''
+              response_body = json.dumps({
+                  "Status": response_status,
+                  "Reason": "See the details in CloudWatch Log Stream: " + context.log_stream_name,
+                  "PhysicalResourceId": context.log_stream_name,
+                  "StackId": event['StackId'],
+                  "RequestId": event['RequestId'],
+                  "LogicalResourceId": event['LogicalResourceId'],
+                  "Data": response_data
+              })
+
+              LOGGER.info('ResponseURL: %s', event['ResponseURL'])
+              LOGGER.info('ResponseBody: %s', response_body)
+
+              opener = build_opener(HTTPHandler)
+              request = Request(event['ResponseURL'], data=response_body.encode())
+              request.add_header('Content-Type', '')
+              request.add_header('Content-Length', len(response_body))
+              request.get_method = lambda: 'PUT'
+              response = opener.open(request)
+              LOGGER.info("Status code: %s", response.getcode())
+              LOGGER.info("Status message: %s", response.msg)
       Environment:
         Variables:
           STATE_MACHINE_ARN: !Ref TerraformDeploymentStateMachine
@@ -327,6 +445,7 @@ Resources:
 
   StepFunctionTrigger:
     Type: "Custom::StateMachineTrigger"
+    DependsOn: CodeBuildProject
     Properties:
       ServiceToken: !GetAtt StateMachineExecutorLambda.Arn
       VPCName: !Ref VPCName
