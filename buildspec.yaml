@@ -37,11 +37,10 @@ phases:
           echo "Terraform $TF_ACTION completed..."
         elif [ "$TF_ACTION" = "apply" ]; then
           echo "Terraform $TF_ACTION approved..."
-          terraform apply tfplan -auto-approve
+          terraform apply -var-file=tfvars.json -auto-approve
         elif [ "$TF_ACTION" = "destroy" ]; then
           echo "Terraform $TF_ACTION approved..."
           terraform destroy -var-file=tfvars.json -auto-approve
         fi
       - echo Terraform $TF_ACTION completed
-    
     
